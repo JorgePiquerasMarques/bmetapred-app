@@ -805,11 +805,23 @@ ui <- page_navbar(
         hr(),
         h6("Stan & Parallelism Settings"),
         selectInput("b_backend", "MCMC Backend (backend):", choices = c("rstan", "cmdstanr"), selected = "rstan"),
-        numericInput("b_iterstan", "Stan MCMC Iterations (iter_stan):", value = 1500, min = 200, max = 6000, step = 250),
         layout_columns(
           col_widths = c(6, 6),
-          numericInput("b_coresstan", "Cores/Stan (cores_stan):", value = 1, min = 1, max = 8, step = 1),
-          numericInput("b_workers", "Workers (parallel_workers):", value = 1, min = 1, max = 16, step = 1)
+          numericInput("b_iterstan", "Stan MCMC Iterations (iter_stan):", value = 1500, min = 200, max = 6000, step = 250),
+          numericInput("b_coresstan", "Cores/Stan (cores_stan):", value = 1, min = 1, max = 8, step = 1)
+        ),
+        conditionalPanel(
+          condition = "input.b_backend == 'cmdstanr'",
+          numericInput("b_workers", "Parallel Workers (parallel_workers):", value = 1, min = 1, max = 16, step = 1)
+        ),
+        conditionalPanel(
+          condition = "input.b_backend == 'rstan'",
+          div(
+            class = "alert alert-warning py-2 px-3 mb-2",
+            style = "font-size: 0.82rem;",
+            strong("Sequential Model Search (rstan): "),
+            "Multi-worker parallelism (parallel_workers > 1) is disabled with rstan for stability and fixed to 1. You can still parallelize MCMC chains with cores_stan, or switch to cmdstanr to enable multiple workers."
+          )
         ),
         
         actionButton("btn_fit_bmetapred", "Run fit_bmetapred (Fit Model Space)", class = "btn-danger w-100 mt-3")
@@ -924,7 +936,7 @@ ui <- page_navbar(
       div(
         class = "bm-partner-logo",
         tags$img(
-          src = "Fundación_BBVA_idgg2t__lM_0.png",
+          src = "logo_fbbva.png",
           alt = "Funding Institution Logo"
         )
       )
@@ -1800,12 +1812,21 @@ server <- function(input, output, session) {
       return()
     }
     
-    p_actual   <- length(estado$m_cols)
-    pmax_usado <- calcular_pmax_interno(p_actual, input$b_search_mode)
-    burn_val   <- if (!is.null(input$b_burnin) && input$b_burnin > 0) as.integer(input$b_burnin) else NULL
-    n_mc3_val  <- if (!is.null(input$b_mc3) && !is.na(input$b_mc3)) as.integer(input$b_mc3) else 1500L
-    min_k_val  <- if (!is.null(input$b_minK) && !is.na(input$b_minK)) as.integer(input$b_minK) else 10L
-    max_k_val  <- if (!is.null(input$b_maxK) && !is.na(input$b_maxK)) as.integer(input$b_maxK) else 50L
+    if (identical(input$b_backend, "cmdstanr") && !requireNamespace("cmdstanr", quietly = TRUE)) {
+      showNotification(
+        "The 'cmdstanr' package is not installed. Select 'rstan' or install cmdstanr from https://mc-stan.org/cmdstanr/.",
+        type = "error", duration = 10
+      )
+      return()
+    }
+    
+    p_actual    <- length(estado$m_cols)
+    pmax_usado  <- calcular_pmax_interno(p_actual, input$b_search_mode)
+    burn_val    <- if (!is.null(input$b_burnin) && input$b_burnin > 0) as.integer(input$b_burnin) else NULL
+    n_mc3_val   <- if (!is.null(input$b_mc3) && !is.na(input$b_mc3)) as.integer(input$b_mc3) else 1500L
+    min_k_val   <- if (!is.null(input$b_minK) && !is.na(input$b_minK)) as.integer(input$b_minK) else 10L
+    max_k_val   <- if (!is.null(input$b_maxK) && !is.na(input$b_maxK)) as.integer(input$b_maxK) else 50L
+    workers_use <- if (identical(input$b_backend, "rstan")) 1L else as.integer(input$b_workers)
     
     df_tr_fit <- estado$df_train
     for (i in seq_along(estado$sd_cols)) {
@@ -1833,7 +1854,7 @@ server <- function(input, output, session) {
       pri_sd_int       = as.numeric(input$b_prisd_int),
       pri_sd_sigma     = as.numeric(input$b_prisd_sigma),
       pri_sd_int_sigma = as.numeric(input$b_prisd_int_sigma),
-      parallel_workers = as.integer(input$b_workers),
+      parallel_workers = workers_use,
       cores_stan       = as.integer(input$b_coresstan),
       iter_stan        = as.integer(input$b_iterstan),
       verbosity        = 1,
@@ -1854,7 +1875,7 @@ server <- function(input, output, session) {
       },
       args      = list(a = args_fit),
       stdout    = log_tmp,
-      stderr    = log_tmp,
+      stderr    = "2>&1",
       supervise = TRUE
     )
   })
@@ -2197,7 +2218,13 @@ server <- function(input, output, session) {
           tags$li(strong("Base Predictors (p): "), if (p_len > 0) sprintf("%d models (%s)", p_len, paste(estado$m_cols, collapse = ", ")) else "None"),
           tags$li(strong("Error Scales (s_ik) Status: "), sd_status_txt),
           tags$li(strong("Search Strategy: "), modo_busqueda),
-          tags$li(strong("MCMC Configuration: "), sprintf("Backend = %s | %d iterations | %d parallel workers", input$b_backend, input$b_iterstan, input$b_workers))
+          tags$li(strong("MCMC Configuration: "), sprintf(
+            "Backend = %s | %d iterations | %d core(s)/Stan | %d parallel worker(s)",
+            input$b_backend,
+            as.integer(input$b_iterstan),
+            as.integer(input$b_coresstan),
+            if (identical(input$b_backend, "rstan")) 1L else as.integer(input$b_workers)
+          ))
         ),
         p(class = "text-muted mt-2", "Click 'Run fit_bmetapred (Fit Model Space)' on the left sidebar to start.")
       )
@@ -2794,7 +2821,7 @@ fit_bm <- fit_bmetapred(
   pri_sd_int       = ', as.numeric(input$b_prisd_int), ',
   pri_sd_sigma     = ', as.numeric(input$b_prisd_sigma), ',
   pri_sd_int_sigma = ', as.numeric(input$b_prisd_int_sigma), ',
-  parallel_workers = ', as.integer(input$b_workers), ',
+  parallel_workers = ', if (identical(input$b_backend, "rstan")) 1L else as.integer(input$b_workers), ',
   cores_stan       = ', as.integer(input$b_coresstan), ',
   iter_stan        = ', as.integer(input$b_iterstan), ',
   backend          = "', input$b_backend, '",
